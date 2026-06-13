@@ -732,6 +732,7 @@ public class NotesListActivity extends Activity implements OnClickListener, OnIt
             mTitleBar.setText(data.getSnippet());
         }
         mTitleBar.setVisibility(View.VISIBLE);
+        invalidateOptionsMenu();
     }
 
     public void onClick(View v) {
@@ -865,6 +866,7 @@ public class NotesListActivity extends Activity implements OnClickListener, OnIt
             default:
                 break;
         }
+        invalidateOptionsMenu();
     }
 
     @Override

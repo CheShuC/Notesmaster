@@ -30,6 +30,7 @@ import android.content.DialogInterface;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
+import android.database.Cursor;
 import android.graphics.Paint;
 import android.net.Uri;
 import android.os.Build;
@@ -163,6 +164,13 @@ public class NoteEditActivity extends Activity implements OnClickListener,
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+
+        Intent intent = getIntent();
+        if (Intent.ACTION_SEARCH.equals(intent.getAction())) {
+            handleSearchIntent(intent);
+            return;
+        }
+
         this.setContentView(R.layout.note_edit);
 
         if (savedInstanceState == null && !initActivityState(getIntent())) {
@@ -364,6 +372,10 @@ public class NoteEditActivity extends Activity implements OnClickListener,
     @Override
     protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
+        if (Intent.ACTION_SEARCH.equals(intent.getAction())) {
+            handleSearchIntent(intent);
+            return;
+        }
         initActivityState(intent);
     }
 
@@ -975,5 +987,67 @@ public class NoteEditActivity extends Activity implements OnClickListener,
 
     private void showToast(int resId, int duration) {
         Toast.makeText(this, resId, duration).show();
+    }
+
+    private void handleSearchIntent(Intent intent) {
+        String query = intent.getStringExtra(SearchManager.QUERY);
+        if (TextUtils.isEmpty(query)) {
+            finish();
+            return;
+        }
+
+        Uri searchUri = Uri.parse("content://" + Notes.AUTHORITY + "/search?pattern="
+                + Uri.encode(query));
+        final Cursor cursor = getContentResolver().query(searchUri, null, null, null, null);
+
+        if (cursor == null || cursor.getCount() == 0) {
+            if (cursor != null) cursor.close();
+            showToast(R.string.search_no_results);
+            finish();
+            return;
+        }
+
+        final int count = cursor.getCount();
+        final String[] items = new String[count];
+        final long[] noteIds = new long[count];
+        int i = 0;
+        while (cursor.moveToNext()) {
+            noteIds[i] = cursor.getLong(0); // _id column
+            String snippet = cursor.getString(2); // suggest_text_1 column
+            if (snippet != null) {
+                snippet = snippet.replace(TAG_CHECKED, "").replace(TAG_UNCHECKED, "");
+                snippet = snippet.trim();
+            }
+            if (TextUtils.isEmpty(snippet)) {
+                snippet = getString(R.string.search);
+            }
+            items[i] = snippet;
+            i++;
+        }
+        cursor.close();
+
+        AlertDialog.Builder builder = new AlertDialog.Builder(this);
+        builder.setTitle(getResources().getQuantityString(R.plurals.search_results_title,
+                count, String.valueOf(count), query));
+        builder.setItems(items, new DialogInterface.OnClickListener() {
+            public void onClick(DialogInterface dialog, int which) {
+                Intent viewIntent = new Intent(NoteEditActivity.this, NoteEditActivity.class);
+                viewIntent.setAction(Intent.ACTION_VIEW);
+                viewIntent.putExtra(Intent.EXTRA_UID, noteIds[which]);
+                startActivity(viewIntent);
+                finish();
+            }
+        });
+        builder.setNegativeButton(android.R.string.cancel, new DialogInterface.OnClickListener() {
+            public void onClick(DialogInterface dialog, int which) {
+                finish();
+            }
+        });
+        builder.setOnCancelListener(new DialogInterface.OnCancelListener() {
+            public void onCancel(DialogInterface dialog) {
+                finish();
+            }
+        });
+        builder.show();
     }
 }

@@ -122,6 +122,7 @@
     <string name="search_hint">搜索便签</string>
     <string name="search_setting_description">便签中的文字</string>
     <string name="search">便签</string>
+    <string name="search_no_results">没有找到便签</string>
     <string name="datetime_dialog_ok">设置</string>
     <string name="datetime_dialog_cancel">取消</string>
     <plurals name="search_results_title">

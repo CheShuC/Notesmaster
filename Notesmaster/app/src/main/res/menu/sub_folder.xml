@@ -27,4 +27,9 @@
         android:id="@+id/menu_new_note"
         android:title="@string/notelist_menu_new"
         android:showAsAction="ifRoom"/>
+
+    <item
+        android:id="@+id/menu_search"
+        android:title="@string/menu_search"
+        android:showAsAction="ifRoom"/>
 </menu>

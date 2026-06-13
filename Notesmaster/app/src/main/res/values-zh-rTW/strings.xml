@@ -123,6 +123,7 @@
     <string name="search_hint">搜索便籤</string>
     <string name="search_setting_description">便籤中的文字</string>
     <string name="search">便籤</string>
+    <string name="search_no_results">沒有找到便籤</string>
     <string name="datetime_dialog_ok">設置</string>
     <string name="datetime_dialog_cancel">取消</string>
     <plurals name="search_results_title">

@@ -21,7 +21,7 @@
     android:hint="@string/search_hint"
     android:searchMode="queryRewriteFromText"
 
-    android:searchSuggestAuthority="notes"
+    android:searchSuggestAuthority="micode_notes"
     android:searchSuggestIntentAction="android.intent.action.VIEW"
     android:searchSettingsDescription="@string/search_setting_description"
     android:includeInGlobalSearch="true" />
