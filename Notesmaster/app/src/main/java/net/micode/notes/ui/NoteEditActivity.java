@@ -726,7 +726,8 @@ public class NoteEditActivity extends Activity implements OnClickListener,
     }
 
     private boolean isSyncMode() {
-        return NotesPreferenceActivity.getSyncAccountName(this).trim().length() > 0;
+        return net.micode.notes.sync.SyncClientFactory.isSyncConfigured(this)
+                || NotesPreferenceActivity.getSyncAccountName(this).trim().length() > 0;
     }
 
     public void onClockAlertChanged(long date, boolean set) {

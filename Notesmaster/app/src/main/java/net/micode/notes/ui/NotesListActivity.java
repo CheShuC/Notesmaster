@@ -30,12 +30,12 @@ import android.content.DialogInterface;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
+import android.preference.PreferenceManager;
 import android.database.Cursor;
 import android.net.Uri;
 import android.os.AsyncTask;
 import android.os.Build;
 import android.os.Bundle;
-import android.preference.PreferenceManager;
 import android.provider.CallLog;
 import android.text.Editable;
 import android.text.TextUtils;
@@ -60,7 +60,6 @@ import android.widget.AdapterView;
 import android.widget.AdapterView.OnItemClickListener;
 import android.widget.AdapterView.OnItemLongClickListener;
 import android.widget.Button;
-import android.widget.CheckBox;
 import android.widget.CompoundButton;
 import android.widget.EditText;
 import android.widget.ListView;
@@ -71,6 +70,7 @@ import android.widget.Toast;
 import net.micode.notes.R;
 import net.micode.notes.data.Notes;
 import net.micode.notes.data.Notes.NoteColumns;
+import net.micode.notes.gtask.remote.GTaskManager;
 import net.micode.notes.gtask.remote.GTaskSyncService;
 import net.micode.notes.model.WorkingNote;
 import net.micode.notes.tool.BackupUtils;
@@ -899,7 +899,7 @@ public class NotesListActivity extends Activity implements OnClickListener, OnIt
             if (mFocusNoteDataItem != null) {
                 menu.setHeaderTitle(mFocusNoteDataItem.getSnippet());
                 menu.add(0, MENU_FOLDER_VIEW, 0, R.string.menu_folder_view);
-                menu.add(0, MENU_FOLDER_DELETE, 0, R.string.menu_folder_delete);
+                menu.add(0, MENU_FOLDER_DELETE, 0, R.string.menu_folder_delete).setIcon(R.drawable.delete);
                 menu.add(0, MENU_FOLDER_CHANGE_NAME, 0, R.string.menu_folder_change_name);
             }
         }
@@ -981,12 +981,15 @@ public class NotesListActivity extends Activity implements OnClickListener, OnIt
         } else if (id == R.id.menu_sync) {
             if (isSyncMode()) {
                 if (TextUtils.equals(item.getTitle(), getString(R.string.menu_sync))) {
-                    GTaskSyncService.startSync(this);
+                    showSyncModeDialog();
                 } else {
                     GTaskSyncService.cancelSync(this);
                 }
             } else {
-                startPreferenceActivity();
+                // Not configured yet — guide user to GitHub auth setup
+                Intent intent = new Intent(this,
+                        net.micode.notes.sync.github.GitHubAuthActivity.class);
+                startActivity(intent);
             }
         } else if (id == R.id.menu_setting) {
             startPreferenceActivity();
@@ -1048,29 +1051,13 @@ public class NotesListActivity extends Activity implements OnClickListener, OnIt
     }
 
     private boolean isSyncMode() {
-        return NotesPreferenceActivity.getSyncAccountName(this).trim().length() > 0;
+        return net.micode.notes.sync.SyncClientFactory.isSyncConfigured(this)
+                || NotesPreferenceActivity.getSyncAccountName(this).trim().length() > 0;
     }
 
     private void startPreferenceActivity() {
-        CheckBox checkBox = new CheckBox(this);
-        checkBox.setText(R.string.preferences_bg_random_appear_title);
-        SharedPreferences sp = PreferenceManager.getDefaultSharedPreferences(this);
-        checkBox.setChecked(sp.getBoolean(
-                NotesPreferenceActivity.PREFERENCE_SET_BG_COLOR_KEY, false));
-
-        AlertDialog.Builder builder = new AlertDialog.Builder(this);
-        builder.setTitle(R.string.preferences_title);
-        builder.setView(checkBox);
-        builder.setPositiveButton(android.R.string.ok,
-                new DialogInterface.OnClickListener() {
-                    public void onClick(DialogInterface dialog, int which) {
-                        sp.edit().putBoolean(
-                                NotesPreferenceActivity.PREFERENCE_SET_BG_COLOR_KEY,
-                                checkBox.isChecked()).commit();
-                    }
-                });
-        builder.setNegativeButton(android.R.string.cancel, null);
-        builder.show();
+        Intent intent = new Intent(this, NotesPreferenceActivity.class);
+        startActivity(intent);
     }
 
     private class OnListItemClickListener implements OnItemClickListener {
@@ -1158,5 +1145,32 @@ public class NotesListActivity extends Activity implements OnClickListener, OnIt
             Log.w(TAG, "SmsSentObserver: onChange triggered");
             checkSentSmsForNewMessages();
         }
+    }
+
+    private void showSyncModeDialog() {
+        final CharSequence[] items = new CharSequence[] {
+                getString(R.string.sync_mode_upload),
+                getString(R.string.sync_mode_download)
+        };
+        new AlertDialog.Builder(this)
+                .setTitle(R.string.menu_sync)
+                .setItems(items, new DialogInterface.OnClickListener() {
+                    public void onClick(DialogInterface dialog, int which) {
+                        int mode;
+                        switch (which) {
+                            case 0:
+                                mode = GTaskManager.SYNC_MODE_UPLOAD_ONLY;
+                                break;
+                            case 1:
+                                mode = GTaskManager.SYNC_MODE_DOWNLOAD_ONLY;
+                                break;
+                            default:
+                                mode = GTaskManager.SYNC_MODE_UPLOAD_ONLY;
+                                break;
+                        }
+                        GTaskSyncService.startSync(NotesListActivity.this, mode);
+                    }
+                })
+                .show();
     }
 }

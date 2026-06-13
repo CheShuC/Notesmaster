@@ -39,8 +39,6 @@ public class Task extends Node {
 
     private String mNotes;
 
-    private JSONObject mMetaInfo;
-
     private Task mPriorSibling;
 
     private TaskList mParent;
@@ -51,7 +49,6 @@ public class Task extends Node {
         mNotes = null;
         mPriorSibling = null;
         mParent = null;
-        mMetaInfo = null;
     }
 
     public JSONObject getCreateAction(int actionId) {
@@ -178,7 +175,8 @@ public class Task extends Node {
     public void setContentByLocalJSON(JSONObject js) {
         if (js == null || !js.has(GTaskStringUtils.META_HEAD_NOTE)
                 || !js.has(GTaskStringUtils.META_HEAD_DATA)) {
-            Log.w(TAG, "setContentByLocalJSON: nothing is avaiable");
+            Log.w(TAG, "setContentByLocalJSON: nothing is available");
+            return;
         }
 
         try {
@@ -207,8 +205,18 @@ public class Task extends Node {
     public JSONObject getLocalJSONFromContent() {
         String name = getName();
         try {
-            if (mMetaInfo == null) {
-                // new task created from web
+            // Try to reconstruct from stored notes (full JSON from upload or download)
+            JSONObject sourceJson = null;
+            if (getNotes() != null && getNotes().trim().length() > 0) {
+                try {
+                    sourceJson = new JSONObject(getNotes());
+                } catch (JSONException e) {
+                    Log.w(TAG, "getNotes is not valid JSON, falling back to minimal note");
+                }
+            }
+
+            if (sourceJson == null) {
+                // New note without stored JSON — build minimal note from name
                 if (name == null) {
                     Log.w(TAG, "the note seems to be an empty one");
                     return null;
@@ -219,27 +227,30 @@ public class Task extends Node {
                 JSONArray dataArray = new JSONArray();
                 JSONObject data = new JSONObject();
                 data.put(DataColumns.CONTENT, name);
+                data.put(DataColumns.MIME_TYPE, DataConstants.NOTE);
                 dataArray.put(data);
                 js.put(GTaskStringUtils.META_HEAD_DATA, dataArray);
                 note.put(NoteColumns.TYPE, Notes.TYPE_NOTE);
                 js.put(GTaskStringUtils.META_HEAD_NOTE, note);
+                js.put("sync_category", extractCategory(DataConstants.NOTE));
                 return js;
-            } else {
-                // synced task
-                JSONObject note = mMetaInfo.getJSONObject(GTaskStringUtils.META_HEAD_NOTE);
-                JSONArray dataArray = mMetaInfo.getJSONArray(GTaskStringUtils.META_HEAD_DATA);
-
-                for (int i = 0; i < dataArray.length(); i++) {
-                    JSONObject data = dataArray.getJSONObject(i);
-                    if (TextUtils.equals(data.getString(DataColumns.MIME_TYPE), DataConstants.NOTE)) {
-                        data.put(DataColumns.CONTENT, getName());
-                        break;
-                    }
-                }
-
-                note.put(NoteColumns.TYPE, Notes.TYPE_NOTE);
-                return mMetaInfo;
             }
+
+            // Existing note — return the full stored JSON as-is.
+            // Content is already correct (never overwrite with getName()).
+            JSONObject note = sourceJson.getJSONObject(GTaskStringUtils.META_HEAD_NOTE);
+            JSONArray dataArray = sourceJson.getJSONArray(GTaskStringUtils.META_HEAD_DATA);
+            note.put(NoteColumns.TYPE, Notes.TYPE_NOTE);
+
+            if (dataArray.length() > 0) {
+                JSONObject firstData = dataArray.getJSONObject(0);
+                if (firstData.has(DataColumns.MIME_TYPE)) {
+                    sourceJson.put("sync_category",
+                            extractCategory(firstData.getString(DataColumns.MIME_TYPE)));
+                }
+            }
+
+            return sourceJson;
         } catch (JSONException e) {
             Log.e(TAG, e.toString());
             e.printStackTrace();
@@ -247,72 +258,21 @@ public class Task extends Node {
         }
     }
 
-    public void setMetaInfo(MetaData metaData) {
-        if (metaData != null && metaData.getNotes() != null) {
-            try {
-                mMetaInfo = new JSONObject(metaData.getNotes());
-            } catch (JSONException e) {
-                Log.w(TAG, e.toString());
-                mMetaInfo = null;
-            }
+    /**
+     * Extract a short category name from a MIME type string.
+     * E.g. "vnd.android.cursor.item/text_note" → "text_note"
+     */
+    private static String extractCategory(String mimeType) {
+        if (TextUtils.isEmpty(mimeType)) return "unknown";
+        int lastSlash = mimeType.lastIndexOf('/');
+        if (lastSlash >= 0 && lastSlash + 1 < mimeType.length()) {
+            return mimeType.substring(lastSlash + 1);
         }
-    }
-
-    public int getSyncAction(Cursor c) {
-        try {
-            JSONObject noteInfo = null;
-            if (mMetaInfo != null && mMetaInfo.has(GTaskStringUtils.META_HEAD_NOTE)) {
-                noteInfo = mMetaInfo.getJSONObject(GTaskStringUtils.META_HEAD_NOTE);
-            }
-
-            if (noteInfo == null) {
-                Log.w(TAG, "it seems that note meta has been deleted");
-                return SYNC_ACTION_UPDATE_REMOTE;
-            }
-
-            if (!noteInfo.has(NoteColumns.ID)) {
-                Log.w(TAG, "remote note id seems to be deleted");
-                return SYNC_ACTION_UPDATE_LOCAL;
-            }
-
-            // validate the note id now
-            if (c.getLong(SqlNote.ID_COLUMN) != noteInfo.getLong(NoteColumns.ID)) {
-                Log.w(TAG, "note id doesn't match");
-                return SYNC_ACTION_UPDATE_LOCAL;
-            }
-
-            if (c.getInt(SqlNote.LOCAL_MODIFIED_COLUMN) == 0) {
-                // there is no local update
-                if (c.getLong(SqlNote.SYNC_ID_COLUMN) == getLastModified()) {
-                    // no update both side
-                    return SYNC_ACTION_NONE;
-                } else {
-                    // apply remote to local
-                    return SYNC_ACTION_UPDATE_LOCAL;
-                }
-            } else {
-                // validate gtask id
-                if (!c.getString(SqlNote.GTASK_ID_COLUMN).equals(getGid())) {
-                    Log.e(TAG, "gtask id doesn't match");
-                    return SYNC_ACTION_ERROR;
-                }
-                if (c.getLong(SqlNote.SYNC_ID_COLUMN) == getLastModified()) {
-                    // local modification only
-                    return SYNC_ACTION_UPDATE_REMOTE;
-                } else {
-                    return SYNC_ACTION_UPDATE_CONFLICT;
-                }
-            }
-        } catch (Exception e) {
-            Log.e(TAG, e.toString());
-            e.printStackTrace();
-        }
-
-        return SYNC_ACTION_ERROR;
+        return mimeType;
     }
 
     public boolean isWorthSaving() {
-        return mMetaInfo != null || (getName() != null && getName().trim().length() > 0)
+        return (getName() != null && getName().trim().length() > 0)
                 || (getNotes() != null && getNotes().trim().length() > 0);
     }
 

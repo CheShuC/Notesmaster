@@ -21,7 +21,7 @@
         android:key="pref_sync_account_key">
     </PreferenceCategory>
 
-    <PreferenceCategory>
+    <PreferenceCategory android:title="@string/preference_category_appearance">
         <CheckBoxPreference
             android:key="pref_key_bg_random_appear"
             android:title="@string/preferences_bg_random_appear_title"

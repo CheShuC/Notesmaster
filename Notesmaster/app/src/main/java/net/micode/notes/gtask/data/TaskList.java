@@ -131,7 +131,8 @@ public class TaskList extends Node {
 
     public void setContentByLocalJSON(JSONObject js) {
         if (js == null || !js.has(GTaskStringUtils.META_HEAD_NOTE)) {
-            Log.w(TAG, "setContentByLocalJSON: nothing is avaiable");
+            Log.w(TAG, "setContentByLocalJSON: nothing is available");
+            return;
         }
 
         try {
@@ -181,39 +182,6 @@ public class TaskList extends Node {
             e.printStackTrace();
             return null;
         }
-    }
-
-    public int getSyncAction(Cursor c) {
-        try {
-            if (c.getInt(SqlNote.LOCAL_MODIFIED_COLUMN) == 0) {
-                // there is no local update
-                if (c.getLong(SqlNote.SYNC_ID_COLUMN) == getLastModified()) {
-                    // no update both side
-                    return SYNC_ACTION_NONE;
-                } else {
-                    // apply remote to local
-                    return SYNC_ACTION_UPDATE_LOCAL;
-                }
-            } else {
-                // validate gtask id
-                if (!c.getString(SqlNote.GTASK_ID_COLUMN).equals(getGid())) {
-                    Log.e(TAG, "gtask id doesn't match");
-                    return SYNC_ACTION_ERROR;
-                }
-                if (c.getLong(SqlNote.SYNC_ID_COLUMN) == getLastModified()) {
-                    // local modification only
-                    return SYNC_ACTION_UPDATE_REMOTE;
-                } else {
-                    // for folder conflicts, just apply local modification
-                    return SYNC_ACTION_UPDATE_REMOTE;
-                }
-            }
-        } catch (Exception e) {
-            Log.e(TAG, e.toString());
-            e.printStackTrace();
-        }
-
-        return SYNC_ACTION_ERROR;
     }
 
     public int getChildTaskCount() {

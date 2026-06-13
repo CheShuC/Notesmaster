@@ -94,7 +94,7 @@
     <string name="error_sync_cancelled">同步已取消</string>
     <string name="sync_progress_login">登陸%1$s...</string>
     <string name="sync_progress_init_list">正在獲取服務器便籤列表...</string>
-    <string name="sync_progress_syncing">正在同步本地便籤...</string>
+    <string name="sync_progress_syncing">正在同步本地便籤到遠程服務器...</string>
     <!-- Preferences -->
     <string name="preferences_title">設置</string>
     <string name="preferences_account_title">同步賬號</string>
@@ -112,7 +112,34 @@
     <string name="preferences_dialog_select_account_tips">請選擇google帳號，便簽將與該帳號的google task內容同步。</string>
     <string name="preferences_toast_cannot_change_account">正在同步中，不能修改同步帳號</string>
     <string name="preferences_toast_success_set_accout">同步帳號已設置為%1$s</string>
+    <string name="preference_category_appearance">外觀</string>
     <string name="preferences_bg_random_appear_title">新建便籤背景顏色隨機</string>
+    <string name="sync_mode_upload">上傳（儲存到遠端）</string>
+    <string name="sync_mode_download">下載（從遠端讀取）</string>
+    <!-- GitHub 同步 -->
+    <string name="preferences_github_account_title">GitHub 同步</string>
+    <string name="preferences_github_account_summary">將便籤同步到 GitHub 私有倉庫</string>
+    <string name="preferences_github_connected_as">已連接為 @%1$s</string>
+    <string name="preferences_github_removed">GitHub 同步帳號已刪除</string>
+    <string name="preferences_github_title">GitHub 同步配置</string>
+    <string name="preferences_github_description">輸入 GitHub Token 將便籤同步到私有倉庫</string>
+    <string name="preferences_github_intro">將你的便籤資料存儲到你自己的 GitHub 私有倉庫 xiaomibianqian 中，實現多設備同步。資料只有你自己可以訪問，Git 歷史可追溯每一次修改。</string>
+    <string name="preferences_github_step_title">📋 獲取 Token 步驟：</string>
+    <string name="preferences_github_step1">1. 瀏覽器打開 GitHub 並登入你的帳號</string>
+    <string name="preferences_github_step2">2. 點擊右上角頭像 → Settings → 左側 Developer settings → Personal access tokens → Tokens (classic)</string>
+    <string name="preferences_github_step3">3. 點擊 Generate new token (classic)，勾選 repo 權限（勾選 repo 下面所有子項）</string>
+    <string name="preferences_github_step4">4. 點擊底部 Generate token，複製生成的 ghp_xxxxxxxxxxxx</string>
+    <string name="preferences_github_token_label">🔑 貼上 Token 到下方：</string>
+    <string name="preferences_github_token_hint">ghp_xxxxxxxxxxxxxxxxxxxx</string>
+    <string name="preferences_github_token_empty">請先貼上 GitHub Token</string>
+    <string name="preferences_github_test_connection">測試連接</string>
+    <string name="preferences_github_save">保存並完成</string>
+    <string name="preferences_github_saved">GitHub 同步配置已保存</string>
+    <string name="preferences_github_testing">正在驗證 Token…</string>
+    <string name="preferences_github_test_success">✅ 連接成功！Token 有效</string>
+    <string name="preferences_github_test_failed_auth">❌ Token 無效，請檢查是否正確複製</string>
+    <string name="preferences_github_test_failed_network">❌ 網絡連接失敗，請檢查網絡</string>
+    <string name="preferences_github_tip">提示：Token 只會在創建時顯示一次，請妥善保存。\n首次同步前請確保已在 GitHub 創建倉庫 xiaomibianqian</string>
 
     <string name="button_delete">刪除</string>
     <string name="call_record_folder_name">通話便籤</string>

@@ -19,8 +19,8 @@ package net.micode.notes.ui;
 import java.util.Calendar;
 
 import net.micode.notes.R;
-import net.micode.notes.ui.DateTimePicker;
-import net.micode.notes.ui.DateTimePicker.OnDateTimeChangedListener;
+import net.micode.notes.ui.DateTimePickerCalendar;
+import net.micode.notes.ui.DateTimePickerCalendar.OnDateTimeChangedListener;
 
 import android.app.AlertDialog;
 import android.content.Context;
@@ -34,7 +34,7 @@ public class DateTimePickerDialog extends AlertDialog implements OnClickListener
     private Calendar mDate = Calendar.getInstance();
     private boolean mIs24HourView;
     private OnDateTimeSetListener mOnDateTimeSetListener;
-    private DateTimePicker mDateTimePicker;
+    private DateTimePickerCalendar mDateTimePicker;
 
     public interface OnDateTimeSetListener {
         void OnDateTimeSet(AlertDialog dialog, long date);
@@ -42,10 +42,10 @@ public class DateTimePickerDialog extends AlertDialog implements OnClickListener
 
     public DateTimePickerDialog(Context context, long date) {
         super(context);
-        mDateTimePicker = new DateTimePicker(context);
+        mDateTimePicker = new DateTimePickerCalendar(context, date);
         setView(mDateTimePicker);
         mDateTimePicker.setOnDateTimeChangedListener(new OnDateTimeChangedListener() {
-            public void onDateTimeChanged(DateTimePicker view, int year, int month,
+            public void onDateTimeChanged(DateTimePickerCalendar view, int year, int month,
                     int dayOfMonth, int hourOfDay, int minute) {
                 mDate.set(Calendar.YEAR, year);
                 mDate.set(Calendar.MONTH, month);
@@ -57,7 +57,6 @@ public class DateTimePickerDialog extends AlertDialog implements OnClickListener
         });
         mDate.setTimeInMillis(date);
         mDate.set(Calendar.SECOND, 0);
-        mDateTimePicker.setCurrentDate(mDate.getTimeInMillis());
         setButton(context.getString(R.string.datetime_dialog_ok), this);
         setButton2(context.getString(R.string.datetime_dialog_cancel), (OnClickListener)null);
         set24HourView(DateFormat.is24HourFormat(this.getContext()));

@@ -27,6 +27,7 @@ import android.content.DialogInterface;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.SharedPreferences;
+import android.os.Build;
 import android.os.Bundle;
 import android.preference.Preference;
 import android.preference.Preference.OnPreferenceClickListener;
@@ -45,6 +46,7 @@ import android.widget.Toast;
 import net.micode.notes.R;
 import net.micode.notes.data.Notes;
 import net.micode.notes.data.Notes.NoteColumns;
+import net.micode.notes.gtask.remote.GTaskManager;
 import net.micode.notes.gtask.remote.GTaskSyncService;
 
 
@@ -86,7 +88,11 @@ public class NotesPreferenceActivity extends PreferenceActivity {
         mReceiver = new GTaskReceiver();
         IntentFilter filter = new IntentFilter();
         filter.addAction(GTaskSyncService.GTASK_SERVICE_BROADCAST_NAME);
-        registerReceiver(mReceiver, filter);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(mReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
+        } else {
+            registerReceiver(mReceiver, filter);
+        }
 
         mOriAccounts = null;
         mHeaderView = LayoutInflater.from(this).inflate(R.layout.settings_header, null);
@@ -133,19 +139,30 @@ public class NotesPreferenceActivity extends PreferenceActivity {
         mAccountCategory.removeAll();
 
         Preference accountPref = new Preference(this);
-        final String defaultAccount = getSyncAccountName(this);
-        accountPref.setTitle(getString(R.string.preferences_account_title));
-        accountPref.setSummary(getString(R.string.preferences_account_summary));
+        String syncAccount = getSyncAccountName(this);
+        boolean isGithubConfigured = net.micode.notes.sync.SyncClientFactory.isSyncConfigured(this);
+
+        if (isGithubConfigured) {
+            String githubUser = net.micode.notes.sync.github.GitHubSyncClient.getOwner(this);
+            accountPref.setTitle(getString(R.string.preferences_github_account_title));
+            accountPref.setSummary(getString(R.string.preferences_github_connected_as,
+                    githubUser));
+        } else {
+            accountPref.setTitle(getString(R.string.preferences_account_title));
+            accountPref.setSummary(getString(R.string.preferences_github_account_summary));
+        }
+
+        final boolean githubConfigured = isGithubConfigured;
         accountPref.setOnPreferenceClickListener(new OnPreferenceClickListener() {
             public boolean onPreferenceClick(Preference preference) {
                 if (!GTaskSyncService.isSyncing()) {
-                    if (TextUtils.isEmpty(defaultAccount)) {
-                        // the first time to set account
-                        showSelectAccountAlertDialog();
+                    if (githubConfigured) {
+                        showGitHubManageDialog();
                     } else {
-                        // if the account has already been set, we need to promp
-                        // user about the risk
-                        showChangeAccountConfirmAlertDialog();
+                        // 未配置 → 直接打开 GitHub 配置引导页
+                        Intent intent = new Intent(NotesPreferenceActivity.this,
+                                net.micode.notes.sync.github.GitHubAuthActivity.class);
+                        startActivity(intent);
                     }
                 } else {
                     Toast.makeText(NotesPreferenceActivity.this,
@@ -157,6 +174,55 @@ public class NotesPreferenceActivity extends PreferenceActivity {
         });
 
         mAccountCategory.addPreference(accountPref);
+    }
+
+    private void showGitHubManageDialog() {
+        AlertDialog.Builder dialogBuilder = new AlertDialog.Builder(this);
+        String githubUser = net.micode.notes.sync.github.GitHubSyncClient.getOwner(this);
+        dialogBuilder.setTitle(getString(R.string.preferences_github_connected_as, githubUser));
+
+        CharSequence[] menuItemArray = new CharSequence[] {
+                getString(R.string.preferences_menu_change_account),
+                getString(R.string.preferences_menu_remove_account),
+                getString(R.string.preferences_menu_cancel)
+        };
+        dialogBuilder.setItems(menuItemArray, new DialogInterface.OnClickListener() {
+            public void onClick(DialogInterface dialog, int which) {
+                if (which == 0) {
+                    // Open GitHub auth activity
+                    Intent intent = new Intent(NotesPreferenceActivity.this,
+                            net.micode.notes.sync.github.GitHubAuthActivity.class);
+                    startActivity(intent);
+                } else if (which == 1) {
+                    removeGitHubAccount();
+                    refreshUI();
+                }
+            }
+        });
+        dialogBuilder.show();
+    }
+
+    private void removeGitHubAccount() {
+        SharedPreferences settings = getSharedPreferences(PREFERENCE_NAME, Context.MODE_PRIVATE);
+        SharedPreferences.Editor editor = settings.edit();
+        editor.remove("pref_github_token");
+        editor.remove("pref_github_owner");
+        editor.remove("pref_sync_provider");
+        editor.remove(PREFERENCE_LAST_SYNC_TIME);
+        editor.commit();
+
+        // clean up local gtask related info
+        new Thread(new Runnable() {
+            public void run() {
+                ContentValues values = new ContentValues();
+                values.put(NoteColumns.GTASK_ID, "");
+                values.put(NoteColumns.SYNC_ID, 0);
+                getContentResolver().update(Notes.CONTENT_NOTE_URI, values, null, null);
+            }
+        }).start();
+
+        Toast.makeText(NotesPreferenceActivity.this,
+                R.string.preferences_github_removed, Toast.LENGTH_SHORT).show();
     }
 
     private void loadSyncButton() {
@@ -182,11 +248,13 @@ public class NotesPreferenceActivity extends PreferenceActivity {
             syncButton.setText(getString(R.string.preferences_button_sync_immediately));
             syncButton.setOnClickListener(new View.OnClickListener() {
                 public void onClick(View v) {
-                    GTaskSyncService.startSync(NotesPreferenceActivity.this);
+                    GTaskSyncService.startSync(NotesPreferenceActivity.this,
+                            GTaskManager.SYNC_MODE_UPLOAD_ONLY);
                 }
             });
         }
-        syncButton.setEnabled(!TextUtils.isEmpty(getSyncAccountName(this)));
+        syncButton.setEnabled(!TextUtils.isEmpty(getSyncAccountName(this))
+                || net.micode.notes.sync.SyncClientFactory.isSyncConfigured(this));
 
         // set last sync time
         if (GTaskSyncService.isSyncing()) {

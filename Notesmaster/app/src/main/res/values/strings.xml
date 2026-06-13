@@ -99,7 +99,7 @@
     <string name="error_sync_cancelled">Sync is canceled</string>
     <string name="sync_progress_login">Logging into %1$s...</string>
     <string name="sync_progress_init_list">Getting remote note list...</string>
-    <string name="sync_progress_syncing">Synchronize local notes with Google Task...</string>
+    <string name="sync_progress_syncing">Synchronizing local notes with remote server...</string>
     <!-- Preferences -->
     <string name="preferences_title">Settings</string>
     <string name="preferences_account_title">Sync account</string>
@@ -118,7 +118,35 @@
     <string name="preferences_dialog_select_account_tips">Please select a google account. Local notes will be synced with google task.</string>
     <string name="preferences_toast_cannot_change_account">Cannot change the account because sync is in progress</string>
     <string name="preferences_toast_success_set_accout">%1$s has been set as the sync account</string>
+    <string name="preference_category_appearance">Appearance</string>
     <string name="preferences_bg_random_appear_title">New note background color random</string>
+    <string name="sync_mode_upload">Upload (Save to remote)</string>
+    <string name="sync_mode_download">Download (Read from remote)</string>
+
+    <!-- GitHub Sync -->
+    <string name="preferences_github_account_title">GitHub Sync</string>
+    <string name="preferences_github_account_summary">Sync notes to a private GitHub repository</string>
+    <string name="preferences_github_connected_as">Connected as @%1$s</string>
+    <string name="preferences_github_removed">GitHub sync account removed</string>
+    <string name="preferences_github_title">GitHub Sync Setup</string>
+    <string name="preferences_github_description">Enter a GitHub Token to sync notes to your private repository</string>
+    <string name="preferences_github_intro">Store your notes in your own private GitHub repository xiaomibianqian and sync across devices. Only you can access your data, with full Git history for every change.</string>
+    <string name="preferences_github_step_title">📋 How to get a Token:</string>
+    <string name="preferences_github_step1">1. Open GitHub in your browser and log in</string>
+    <string name="preferences_github_step2">2. Click avatar → Settings → Developer settings → Personal access tokens → Tokens (classic)</string>
+    <string name="preferences_github_step3">3. Click Generate new token (classic), check repo scope (all sub-items)</string>
+    <string name="preferences_github_step4">4. Click Generate token at the bottom, copy the ghp_xxxxxxxxxxxx</string>
+    <string name="preferences_github_token_label">🔑 Paste Token below:</string>
+    <string name="preferences_github_token_hint">ghp_xxxxxxxxxxxxxxxxxxxx</string>
+    <string name="preferences_github_token_empty">Please paste your GitHub Token</string>
+    <string name="preferences_github_test_connection">Test Connection</string>
+    <string name="preferences_github_save">Save &amp; Finish</string>
+    <string name="preferences_github_saved">GitHub sync configuration saved</string>
+    <string name="preferences_github_testing">Verifying token…</string>
+    <string name="preferences_github_test_success">✅ Connected! Token is valid</string>
+    <string name="preferences_github_test_failed_auth">❌ Invalid token, please check and re-paste</string>
+    <string name="preferences_github_test_failed_network">❌ Network error, please check your connection</string>
+    <string name="preferences_github_tip">Tip: The token is only shown once when created. Keep it safe.\nMake sure you have created the repository xiaomibianqian before first sync</string>
 
     <string name="button_delete">Delete</string>
     <string name="call_record_folder_name">Call notes</string>

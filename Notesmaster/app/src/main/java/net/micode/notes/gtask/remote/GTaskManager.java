@@ -18,7 +18,6 @@ package net.micode.notes.gtask.remote;
 
 import android.app.Activity;
 import android.content.ContentResolver;
-import android.content.ContentUris;
 import android.content.ContentValues;
 import android.content.Context;
 import android.database.Cursor;
@@ -28,13 +27,12 @@ import net.micode.notes.R;
 import net.micode.notes.data.Notes;
 import net.micode.notes.data.Notes.DataColumns;
 import net.micode.notes.data.Notes.NoteColumns;
-import net.micode.notes.gtask.data.MetaData;
-import net.micode.notes.gtask.data.Node;
 import net.micode.notes.gtask.data.SqlNote;
 import net.micode.notes.gtask.data.Task;
 import net.micode.notes.gtask.data.TaskList;
-import net.micode.notes.gtask.exception.ActionFailureException;
-import net.micode.notes.gtask.exception.NetworkFailureException;
+import net.micode.notes.sync.SyncClient;
+import net.micode.notes.sync.SyncClientFactory;
+import net.micode.notes.sync.SyncException;
 import net.micode.notes.tool.DataUtils;
 import net.micode.notes.tool.GTaskStringUtils;
 
@@ -43,9 +41,6 @@ import org.json.JSONException;
 import org.json.JSONObject;
 
 import java.util.HashMap;
-import java.util.HashSet;
-import java.util.Iterator;
-import java.util.Map;
 
 
 public class GTaskManager {
@@ -61,6 +56,12 @@ public class GTaskManager {
 
     public static final int STATE_SYNC_CANCELLED = 4;
 
+    public static final int SYNC_MODE_BIDIRECTIONAL = 0;
+
+    public static final int SYNC_MODE_UPLOAD_ONLY = 1;
+
+    public static final int SYNC_MODE_DOWNLOAD_ONLY = 2;
+
     private static GTaskManager mInstance = null;
 
     private Activity mActivity;
@@ -73,30 +74,17 @@ public class GTaskManager {
 
     private boolean mCancelled;
 
-    private HashMap<String, TaskList> mGTaskListHashMap;
+    private GTaskASyncTask asyncTask;
 
-    private HashMap<String, Node> mGTaskHashMap;
+    private int mSyncMode;
 
-    private HashMap<String, MetaData> mMetaHashMap;
-
-    private TaskList mMetaList;
-
-    private HashSet<Long> mLocalDeleteIdMap;
-
-    private HashMap<String, Long> mGidToNid;
-
-    private HashMap<Long, String> mNidToGid;
+    private int mSyncCountAdded;
+    private int mSyncCountUpdated;
+    private int mSyncCountDeleted;
 
     private GTaskManager() {
         mSyncing = false;
         mCancelled = false;
-        mGTaskListHashMap = new HashMap<String, TaskList>();
-        mGTaskHashMap = new HashMap<String, Node>();
-        mMetaHashMap = new HashMap<String, MetaData>();
-        mMetaList = null;
-        mLocalDeleteIdMap = new HashSet<Long>();
-        mGidToNid = new HashMap<String, Long>();
-        mNidToGid = new HashMap<Long, String>();
     }
 
     public static synchronized GTaskManager getInstance() {
@@ -107,691 +95,479 @@ public class GTaskManager {
     }
 
     public synchronized void setActivityContext(Activity activity) {
-        // used for getting authtoken
         mActivity = activity;
     }
 
-    public int sync(Context context, GTaskASyncTask asyncTask) {
+    // ── Main entry point ────────────────────────────────────────────
+
+    public int sync(Context context, GTaskASyncTask asyncTask, int syncMode) {
         if (mSyncing) {
             Log.d(TAG, "Sync is in progress");
             return STATE_SYNC_IN_PROGRESS;
         }
         mContext = context;
         mContentResolver = mContext.getContentResolver();
+        this.asyncTask = asyncTask;
+        mSyncMode = syncMode;
         mSyncing = true;
         mCancelled = false;
-        mGTaskListHashMap.clear();
-        mGTaskHashMap.clear();
-        mMetaHashMap.clear();
-        mLocalDeleteIdMap.clear();
-        mGidToNid.clear();
-        mNidToGid.clear();
+        mSyncCountAdded = 0;
+        mSyncCountUpdated = 0;
+        mSyncCountDeleted = 0;
 
         try {
-            GTaskClient client = GTaskClient.getInstance();
-            client.resetUpdateArray();
+            SyncClient syncClient = SyncClientFactory.getSyncClient(mContext);
+            if (syncClient == null) {
+                Log.e(TAG, "no sync client configured");
+                asyncTask.publishProgess("没有配置同步服务，请先在设置中配置 GitHub Token");
+                return STATE_INTERNAL_ERROR;
+            }
+            syncClient.resetUpdateState();
 
-            // login google task
+            // Login
             if (!mCancelled) {
-                if (!client.login(mActivity)) {
-                    throw new NetworkFailureException("login google task failed");
+                Log.d(TAG, "sync: logging in");
+                if (!syncClient.login(mContext)) {
+                    throw new SyncException(SyncException.AUTH_ERROR,
+                            "login sync service failed");
                 }
             }
 
-            // get the task list from google
-            asyncTask.publishProgess(mContext.getString(R.string.sync_progress_init_list));
-            initGTaskList();
+            // Execute the sync
+            if (mSyncMode == SYNC_MODE_UPLOAD_ONLY) {
+                if (!mCancelled) uploadAll(syncClient);
+            } else if (mSyncMode == SYNC_MODE_DOWNLOAD_ONLY) {
+                if (!mCancelled) downloadAll(syncClient);
+            } else {
+                // Bidirectional: default to upload for safety
+                if (!mCancelled) uploadAll(syncClient);
+            }
 
-            // do content sync work
-            asyncTask.publishProgess(mContext.getString(R.string.sync_progress_syncing));
-            syncContent();
-        } catch (NetworkFailureException e) {
-            Log.e(TAG, e.toString());
-            return STATE_NETWORK_ERROR;
-        } catch (ActionFailureException e) {
-            Log.e(TAG, e.toString());
+            // Build summary
+            StringBuilder summary = new StringBuilder();
+            if (mSyncCountAdded > 0) {
+                summary.append("新增 ").append(mSyncCountAdded).append(" 条");
+            }
+            if (mSyncCountUpdated > 0) {
+                if (summary.length() > 0) summary.append("，");
+                summary.append("更新 ").append(mSyncCountUpdated).append(" 条");
+            }
+            if (summary.length() == 0) {
+                if (mSyncMode == SYNC_MODE_DOWNLOAD_ONLY) {
+                    summary.append("远程仓库无新文件可下载");
+                } else {
+                    summary.append("无新笔记需上传");
+                }
+            }
+            Log.d(TAG, "sync: " + summary.toString());
+            asyncTask.publishProgess(summary.toString());
+
+        } catch (SyncException e) {
+            Log.e(TAG, "SyncException: " + e.toString(), e);
+            asyncTask.publishProgess("同步失败: " + e.getMessage());
+            if (e.getErrorCode() == SyncException.NETWORK_ERROR
+                    || e.getErrorCode() == SyncException.AUTH_ERROR) {
+                return STATE_NETWORK_ERROR;
+            }
             return STATE_INTERNAL_ERROR;
         } catch (Exception e) {
-            Log.e(TAG, e.toString());
-            e.printStackTrace();
+            Log.e(TAG, "Unexpected sync error: " + e.toString(), e);
+            String detail = e.getClass().getSimpleName() + ": "
+                    + (e.getMessage() != null ? e.getMessage() : "(no message)");
+            asyncTask.publishProgess("同步异常: " + detail);
             return STATE_INTERNAL_ERROR;
         } finally {
-            mGTaskListHashMap.clear();
-            mGTaskHashMap.clear();
-            mMetaHashMap.clear();
-            mLocalDeleteIdMap.clear();
-            mGidToNid.clear();
-            mNidToGid.clear();
             mSyncing = false;
         }
 
         return mCancelled ? STATE_SYNC_CANCELLED : STATE_SUCCESS;
     }
 
-    private void initGTaskList() throws NetworkFailureException {
-        if (mCancelled)
-            return;
-        GTaskClient client = GTaskClient.getInstance();
+    // ── Upload — overwrite remote with all local notes ──────────────
+
+    private void uploadAll(SyncClient syncClient) throws SyncException {
+        Log.d(TAG, "uploadAll: starting upload-overwrite");
+
+        // Step 1: Clear remote and reset local sync metadata
+        asyncTask.publishProgess("清空远程仓库...");
+        clearAllRemote(syncClient);
+        resetLocalSyncMetadata();
+
+        // Step 2: Create Default container
+        String defaultPath = GTaskStringUtils.MIUI_FOLDER_PREFFIX
+                + GTaskStringUtils.FOLDER_DEFAULT;
+        ensureUploadContainer(syncClient, defaultPath);
+        HashMap<Long, String> folderIdToPath = new HashMap<>();
+        folderIdToPath.put((long) Notes.ID_ROOT_FOLDER, defaultPath);
+
+        // Step 3: Upload custom folders, building ID → path map
+        asyncTask.publishProgess("上传文件夹...");
+        Cursor folderCursor = null;
         try {
-            JSONArray jsTaskLists = client.getTaskLists();
+            folderCursor = mContentResolver.query(Notes.CONTENT_NOTE_URI,
+                    SqlNote.PROJECTION_NOTE,
+                    "(type=? AND parent_id<>? AND _id<>? AND _id<>?)",
+                    new String[] {
+                            String.valueOf(Notes.TYPE_FOLDER),
+                            String.valueOf(Notes.ID_TRASH_FOLER),
+                            String.valueOf(Notes.ID_CALL_RECORD_FOLDER),
+                            String.valueOf(Notes.ID_SMS_RECORD_FOLDER)
+                    }, null);
+            if (folderCursor != null) {
+                while (folderCursor.moveToNext()) {
+                    if (mCancelled) return;
+                    long folderId = folderCursor.getLong(SqlNote.ID_COLUMN);
+                    String snippet = folderCursor.getString(SqlNote.SNIPPET_COLUMN);
+                    if (snippet == null || snippet.trim().isEmpty()) continue;
+                    String path = GTaskStringUtils.MIUI_FOLDER_PREFFIX + snippet;
+                    ensureUploadContainer(syncClient, path);
+                    folderIdToPath.put(folderId, path);
 
-            // init meta list first
-            mMetaList = null;
-            for (int i = 0; i < jsTaskLists.length(); i++) {
-                JSONObject object = jsTaskLists.getJSONObject(i);
-                String gid = object.getString(GTaskStringUtils.GTASK_JSON_ID);
-                String name = object.getString(GTaskStringUtils.GTASK_JSON_NAME);
+                    // Set gid on the local folder
+                    SqlNote folderNote = new SqlNote(mContext, folderCursor);
+                    folderNote.setGtaskId(path);
+                    folderNote.commit(false);
+                    folderNote.resetLocalModified();
+                    folderNote.commit(true);
+                }
+            }
+        } finally {
+            if (folderCursor != null) folderCursor.close();
+        }
 
-                if (name
-                        .equals(GTaskStringUtils.MIUI_FOLDER_PREFFIX + GTaskStringUtils.FOLDER_META)) {
-                    mMetaList = new TaskList();
-                    mMetaList.setContentByRemoteJSON(object);
+        // Step 4: Upload all notes
+        asyncTask.publishProgess("上传笔记...");
+        Cursor noteCursor = null;
+        try {
+            noteCursor = mContentResolver.query(Notes.CONTENT_NOTE_URI,
+                    SqlNote.PROJECTION_NOTE,
+                    "(type=? AND parent_id<>? AND parent_id<>? AND parent_id<>? AND parent_id<>?)",
+                    new String[] {
+                            String.valueOf(Notes.TYPE_NOTE),
+                            String.valueOf(Notes.ID_TRASH_FOLER),
+                            String.valueOf(Notes.ID_TEMPARAY_FOLDER),
+                            String.valueOf(Notes.ID_CALL_RECORD_FOLDER),
+                            String.valueOf(Notes.ID_SMS_RECORD_FOLDER)
+                    }, NoteColumns.TYPE + " DESC");
+            if (noteCursor != null) {
+                while (noteCursor.moveToNext()) {
+                    if (mCancelled) return;
+                    SqlNote sqlNote = new SqlNote(mContext, noteCursor);
+                    JSONObject content = sqlNote.getContent();
+                    if (content == null) {
+                        Log.w(TAG, "uploadAll: skipping note with null content, id="
+                                + sqlNote.getId());
+                        continue;
+                    }
 
-                    // load meta data
-                    JSONArray jsMetas = client.getTaskList(gid);
-                    for (int j = 0; j < jsMetas.length(); j++) {
-                        object = (JSONObject) jsMetas.getJSONObject(j);
-                        MetaData metaData = new MetaData();
-                        metaData.setContentByRemoteJSON(object);
-                        if (metaData.isWorthSaving()) {
-                            mMetaList.addChildTask(metaData);
-                            if (metaData.getGid() != null) {
-                                mMetaHashMap.put(metaData.getRelatedGid(), metaData);
-                            }
-                        }
+                    long parentId = sqlNote.getParentId();
+                    String containerPath = folderIdToPath.get(parentId);
+                    if (containerPath == null) {
+                        // Note in an unknown folder (e.g. root) — put in Default
+                        containerPath = defaultPath;
+                    }
+
+                    // Build Task from local content and upload
+                    Task task = new Task();
+                    task.setNotes(content.toString());
+                    task.setContentByLocalJSON(content);
+                    String gid = syncClient.createItem(containerPath, task);
+
+                    if (gid != null && !gid.isEmpty()) {
+                        sqlNote.setGtaskId(gid);
+                        sqlNote.resetLocalModified();
+                        sqlNote.commit(true);
+                        mSyncCountAdded++;
                     }
                 }
             }
+        } finally {
+            if (noteCursor != null) noteCursor.close();
+        }
 
-            // create meta list if not existed
-            if (mMetaList == null) {
-                mMetaList = new TaskList();
-                mMetaList.setName(GTaskStringUtils.MIUI_FOLDER_PREFFIX
-                        + GTaskStringUtils.FOLDER_META);
-                GTaskClient.getInstance().createTaskList(mMetaList);
+        Log.d(TAG, "uploadAll: finished, uploaded " + mSyncCountAdded + " notes");
+    }
+
+    // ── Download — incrementally pull remote notes to local ─────────
+
+    private void downloadAll(SyncClient syncClient) throws SyncException {
+        Log.d(TAG, "downloadAll: starting incremental download");
+
+        asyncTask.publishProgess("列出远程目录...");
+        JSONArray containers = syncClient.listContainers();
+        Log.d(TAG, "downloadAll: got " + containers.length() + " containers");
+
+        String defaultPath = GTaskStringUtils.MIUI_FOLDER_PREFFIX
+                + GTaskStringUtils.FOLDER_DEFAULT;
+        String metaName = GTaskStringUtils.MIUI_FOLDER_PREFFIX
+                + GTaskStringUtils.FOLDER_META;
+        HashMap<String, Long> pathToFolderId = new HashMap<>();
+        pathToFolderId.put(defaultPath, (long) Notes.ID_ROOT_FOLDER);
+
+        for (int ci = 0; ci < containers.length(); ci++) {
+            if (mCancelled) return;
+            try {
+                JSONObject container = containers.getJSONObject(ci);
+                String containerPath = container.getString(GTaskStringUtils.GTASK_JSON_ID);
+                String containerName = container.getString(GTaskStringUtils.GTASK_JSON_NAME);
+
+                // Skip METADATA container (legacy from old sync)
+                if (metaName.equals(containerName)) {
+                    Log.d(TAG, "downloadAll: skipping METADATA container");
+                    continue;
+                }
+
+                asyncTask.publishProgess("下载 " + containerName + "...");
+
+                // Ensure local folder exists
+                long folderId = ensureLocalFolder(containerPath, containerName);
+                pathToFolderId.put(containerPath, folderId);
+
+                // List and download all note files
+                JSONArray items = syncClient.listItems(containerPath);
+                for (int ii = 0; ii < items.length(); ii++) {
+                    if (mCancelled) return;
+                    JSONObject item = items.getJSONObject(ii);
+                    String itemPath = item.getString(GTaskStringUtils.GTASK_JSON_ID);
+
+                    Task task = new Task();
+                    task.setContentByRemoteJSON(item);
+
+                    if (!task.isWorthSaving()) continue;
+
+                    JSONObject noteJson = task.getLocalJSONFromContent();
+                    if (noteJson == null) continue;
+
+                    // Check if we already have this note locally
+                    long existingId = findLocalNoteByGid(itemPath);
+                    SqlNote sqlNote;
+                    if (existingId > 0) {
+                        // Update existing note — keep JSON as-is
+                        sqlNote = new SqlNote(mContext, existingId);
+                        sqlNote.setContent(noteJson);
+                        sqlNote.setParentId(folderId);
+                        sqlNote.setGtaskId(itemPath);
+                        sqlNote.commit(true);
+                        mSyncCountUpdated++;
+                    } else {
+                        // New note — strip stale IDs from source device first
+                        stripStaleIds(noteJson);
+                        sqlNote = new SqlNote(mContext);
+                        sqlNote.setContent(noteJson);
+                        sqlNote.setParentId(folderId);
+                        sqlNote.setGtaskId(itemPath);
+                        sqlNote.commit(false);
+                        mSyncCountAdded++;
+                    }
+
+                    sqlNote.resetLocalModified();
+                    sqlNote.commit(true);
+                }
+            } catch (JSONException e) {
+                Log.e(TAG, "downloadAll: JSON error", e);
+                throw new SyncException(SyncException.DATA_ERROR,
+                        "Failed to process container during download", e);
             }
+        }
 
-            // init task list
-            for (int i = 0; i < jsTaskLists.length(); i++) {
-                JSONObject object = jsTaskLists.getJSONObject(i);
-                String gid = object.getString(GTaskStringUtils.GTASK_JSON_ID);
-                String name = object.getString(GTaskStringUtils.GTASK_JSON_NAME);
+        Log.d(TAG, "downloadAll: finished, added=" + mSyncCountAdded
+                + " updated=" + mSyncCountUpdated);
+    }
 
-                if (name.startsWith(GTaskStringUtils.MIUI_FOLDER_PREFFIX)
-                        && !name.equals(GTaskStringUtils.MIUI_FOLDER_PREFFIX
-                                + GTaskStringUtils.FOLDER_META)) {
-                    TaskList tasklist = new TaskList();
-                    tasklist.setContentByRemoteJSON(object);
-                    mGTaskListHashMap.put(gid, tasklist);
-                    mGTaskHashMap.put(gid, tasklist);
+    // ── Helpers ─────────────────────────────────────────────────────
 
-                    // load tasks
-                    JSONArray jsTasks = client.getTaskList(gid);
-                    for (int j = 0; j < jsTasks.length(); j++) {
-                        object = (JSONObject) jsTasks.getJSONObject(j);
-                        gid = object.getString(GTaskStringUtils.GTASK_JSON_ID);
-                        Task task = new Task();
-                        task.setContentByRemoteJSON(object);
-                        if (task.isWorthSaving()) {
-                            task.setMetaInfo(mMetaHashMap.get(gid));
-                            tasklist.addChildTask(task);
-                            mGTaskHashMap.put(gid, task);
+    /**
+     * Ensure a container exists on remote (idempotent — skips if already present).
+     */
+    private void ensureUploadContainer(SyncClient syncClient, String containerName)
+            throws SyncException {
+        JSONArray existing = syncClient.listContainers();
+        for (int i = 0; i < existing.length(); i++) {
+            try {
+                JSONObject c = existing.getJSONObject(i);
+                if (containerName.equals(c.optString(GTaskStringUtils.GTASK_JSON_NAME))) {
+                    return; // Already exists
+                }
+            } catch (JSONException e) {
+                Log.w(TAG, "ensureUploadContainer: JSON error checking existing", e);
+            }
+        }
+        TaskList taskList = new TaskList();
+        taskList.setName(containerName);
+        syncClient.createContainer(taskList);
+        Log.d(TAG, "ensureUploadContainer: created " + containerName);
+    }
+
+    /**
+     * Ensure a folder exists locally for the given remote path/name.
+     * Returns the local folder ID (creates if not found).
+     */
+    private long ensureLocalFolder(String remotePath, String remoteName) throws SyncException {
+        String folderName = remoteName;
+        if (folderName.startsWith(GTaskStringUtils.MIUI_FOLDER_PREFFIX)) {
+            folderName = folderName.substring(GTaskStringUtils.MIUI_FOLDER_PREFFIX.length());
+        }
+
+        if (folderName.equals(GTaskStringUtils.FOLDER_DEFAULT)) {
+            return Notes.ID_ROOT_FOLDER;
+        }
+
+        // Check if folder exists locally by snippet (ignoring trashed folders)
+        Cursor c = null;
+        try {
+            c = mContentResolver.query(Notes.CONTENT_NOTE_URI,
+                    new String[] { NoteColumns.ID },
+                    NoteColumns.TYPE + "=? AND " + NoteColumns.SNIPPET + "=? AND "
+                            + NoteColumns.PARENT_ID + "<>?",
+                    new String[] {
+                            String.valueOf(Notes.TYPE_FOLDER), folderName,
+                            String.valueOf(Notes.ID_TRASH_FOLER)
+                    }, null);
+            if (c != null && c.moveToFirst()) {
+                long id = c.getLong(0);
+                // Update gid on existing folder
+                SqlNote fn = new SqlNote(mContext, id);
+                fn.setGtaskId(remotePath);
+                fn.commit(false);
+                fn.resetLocalModified();
+                fn.commit(true);
+                return id;
+            }
+        } finally {
+            if (c != null) c.close();
+        }
+
+        // Create new folder locally
+        SqlNote folderNote = new SqlNote(mContext);
+        TaskList taskList = new TaskList();
+        taskList.setName(remoteName);
+        JSONObject folderJson = taskList.getLocalJSONFromContent();
+        folderNote.setContent(folderJson);
+        folderNote.setParentId(Notes.ID_ROOT_FOLDER);
+        folderNote.setGtaskId(remotePath);
+        folderNote.commit(false);
+        folderNote.resetLocalModified();
+        folderNote.commit(true);
+
+        Log.d(TAG, "ensureLocalFolder: created '" + folderName + "' id=" + folderNote.getId());
+        return folderNote.getId();
+    }
+
+    /**
+     * Find a local note by its remote gtask_id.
+     * Returns the note ID, or -1 if not found.
+     */
+    private long findLocalNoteByGid(String gid) {
+        Cursor c = null;
+        try {
+            c = mContentResolver.query(Notes.CONTENT_NOTE_URI,
+                    new String[] { NoteColumns.ID },
+                    NoteColumns.GTASK_ID + "=? AND " + NoteColumns.GTASK_ID + "!=''",
+                    new String[] { gid }, null);
+            if (c != null && c.moveToFirst()) {
+                return c.getLong(0);
+            }
+        } finally {
+            if (c != null) c.close();
+        }
+        return -1;
+    }
+
+    /**
+     * Strip note/data IDs from a downloaded JSON that belong to another device.
+     */
+    private void stripStaleIds(JSONObject noteJson) {
+        try {
+            if (noteJson.has(GTaskStringUtils.META_HEAD_NOTE)) {
+                JSONObject note = noteJson.getJSONObject(GTaskStringUtils.META_HEAD_NOTE);
+                if (note.has(NoteColumns.ID)) {
+                    long id = note.getLong(NoteColumns.ID);
+                    if (DataUtils.existInNoteDatabase(mContentResolver, id)) {
+                        note.remove(NoteColumns.ID);
+                    }
+                }
+            }
+            if (noteJson.has(GTaskStringUtils.META_HEAD_DATA)) {
+                JSONArray dataArray = noteJson.getJSONArray(GTaskStringUtils.META_HEAD_DATA);
+                for (int i = 0; i < dataArray.length(); i++) {
+                    JSONObject data = dataArray.getJSONObject(i);
+                    if (data.has(DataColumns.ID)) {
+                        long dataId = data.getLong(DataColumns.ID);
+                        if (DataUtils.existInDataDatabase(mContentResolver, dataId)) {
+                            data.remove(DataColumns.ID);
                         }
                     }
                 }
             }
         } catch (JSONException e) {
-            Log.e(TAG, e.toString());
-            e.printStackTrace();
-            throw new ActionFailureException("initGTaskList: handing JSONObject failed");
+            Log.w(TAG, "stripStaleIds: JSON error", e);
         }
     }
 
-    private void syncContent() throws NetworkFailureException {
-        int syncType;
-        Cursor c = null;
-        String gid;
-        Node node;
+    // ── Remote cleanup ──────────────────────────────────────────────
 
-        mLocalDeleteIdMap.clear();
-
-        if (mCancelled) {
-            return;
-        }
-
-        // for local deleted note
+    /**
+     * Delete all remote containers and their files.
+     */
+    private void clearAllRemote(SyncClient syncClient) throws SyncException {
         try {
-            c = mContentResolver.query(Notes.CONTENT_NOTE_URI, SqlNote.PROJECTION_NOTE,
-                    "(type<>? AND parent_id=?)", new String[] {
-                            String.valueOf(Notes.TYPE_SYSTEM), String.valueOf(Notes.ID_TRASH_FOLER)
-                    }, null);
-            if (c != null) {
-                while (c.moveToNext()) {
-                    gid = c.getString(SqlNote.GTASK_ID_COLUMN);
-                    node = mGTaskHashMap.get(gid);
-                    if (node != null) {
-                        mGTaskHashMap.remove(gid);
-                        doContentSync(Node.SYNC_ACTION_DEL_REMOTE, node, c);
-                    }
-
-                    mLocalDeleteIdMap.add(c.getLong(SqlNote.ID_COLUMN));
-                }
-            } else {
-                Log.w(TAG, "failed to query trash folder");
-            }
-        } finally {
-            if (c != null) {
-                c.close();
-                c = null;
-            }
-        }
-
-        // sync folder first
-        syncFolder();
-
-        // for note existing in database
-        try {
-            c = mContentResolver.query(Notes.CONTENT_NOTE_URI, SqlNote.PROJECTION_NOTE,
-                    "(type=? AND parent_id<>?)", new String[] {
-                            String.valueOf(Notes.TYPE_NOTE), String.valueOf(Notes.ID_TRASH_FOLER)
-                    }, NoteColumns.TYPE + " DESC");
-            if (c != null) {
-                while (c.moveToNext()) {
-                    gid = c.getString(SqlNote.GTASK_ID_COLUMN);
-                    node = mGTaskHashMap.get(gid);
-                    if (node != null) {
-                        mGTaskHashMap.remove(gid);
-                        mGidToNid.put(gid, c.getLong(SqlNote.ID_COLUMN));
-                        mNidToGid.put(c.getLong(SqlNote.ID_COLUMN), gid);
-                        syncType = node.getSyncAction(c);
-                    } else {
-                        if (c.getString(SqlNote.GTASK_ID_COLUMN).trim().length() == 0) {
-                            // local add
-                            syncType = Node.SYNC_ACTION_ADD_REMOTE;
-                        } else {
-                            // remote delete
-                            syncType = Node.SYNC_ACTION_DEL_LOCAL;
+            JSONArray containers = syncClient.listContainers();
+            for (int i = 0; i < containers.length(); i++) {
+                JSONObject container = containers.getJSONObject(i);
+                String containerId = container.getString(GTaskStringUtils.GTASK_JSON_ID);
+                Log.d(TAG, "clearAllRemote: deleting items in " + containerId);
+                try {
+                    JSONArray items = syncClient.listItems(containerId);
+                    for (int j = 0; j < items.length(); j++) {
+                        JSONObject item = items.getJSONObject(j);
+                        String itemId = item.getString(GTaskStringUtils.GTASK_JSON_ID);
+                        try {
+                            syncClient.deleteItem(itemId);
+                        } catch (Exception e) {
+                            Log.w(TAG, "clearAllRemote: failed to delete " + itemId
+                                    + ": " + e.getMessage());
                         }
                     }
-                    doContentSync(syncType, node, c);
+                } catch (Exception e) {
+                    Log.w(TAG, "clearAllRemote: failed to list " + containerId
+                            + ": " + e.getMessage());
                 }
-            } else {
-                Log.w(TAG, "failed to query existing note in database");
-            }
-
-        } finally {
-            if (c != null) {
-                c.close();
-                c = null;
-            }
-        }
-
-        // go through remaining items
-        Iterator<Map.Entry<String, Node>> iter = mGTaskHashMap.entrySet().iterator();
-        while (iter.hasNext()) {
-            Map.Entry<String, Node> entry = iter.next();
-            node = entry.getValue();
-            doContentSync(Node.SYNC_ACTION_ADD_LOCAL, node, null);
-        }
-
-        // mCancelled can be set by another thread, so we neet to check one by
-        // one
-        // clear local delete table
-        if (!mCancelled) {
-            if (!DataUtils.batchDeleteNotes(mContentResolver, mLocalDeleteIdMap)) {
-                throw new ActionFailureException("failed to batch-delete local deleted notes");
-            }
-        }
-
-        // refresh local sync id
-        if (!mCancelled) {
-            GTaskClient.getInstance().commitUpdate();
-            refreshLocalSyncId();
-        }
-
-    }
-
-    private void syncFolder() throws NetworkFailureException {
-        Cursor c = null;
-        String gid;
-        Node node;
-        int syncType;
-
-        if (mCancelled) {
-            return;
-        }
-
-        // for root folder
-        try {
-            c = mContentResolver.query(ContentUris.withAppendedId(Notes.CONTENT_NOTE_URI,
-                    Notes.ID_ROOT_FOLDER), SqlNote.PROJECTION_NOTE, null, null, null);
-            if (c != null) {
-                c.moveToNext();
-                gid = c.getString(SqlNote.GTASK_ID_COLUMN);
-                node = mGTaskHashMap.get(gid);
-                if (node != null) {
-                    mGTaskHashMap.remove(gid);
-                    mGidToNid.put(gid, (long) Notes.ID_ROOT_FOLDER);
-                    mNidToGid.put((long) Notes.ID_ROOT_FOLDER, gid);
-                    // for system folder, only update remote name if necessary
-                    if (!node.getName().equals(
-                            GTaskStringUtils.MIUI_FOLDER_PREFFIX + GTaskStringUtils.FOLDER_DEFAULT))
-                        doContentSync(Node.SYNC_ACTION_UPDATE_REMOTE, node, c);
-                } else {
-                    doContentSync(Node.SYNC_ACTION_ADD_REMOTE, node, c);
+                try {
+                    syncClient.deleteItem(containerId + "/.gitkeep");
+                } catch (Exception e) {
+                    Log.w(TAG, "clearAllRemote: failed to delete .gitkeep for " + containerId);
                 }
-            } else {
-                Log.w(TAG, "failed to query root folder");
             }
-        } finally {
-            if (c != null) {
-                c.close();
-                c = null;
-            }
-        }
-
-        // for call-note folder
-        try {
-            c = mContentResolver.query(Notes.CONTENT_NOTE_URI, SqlNote.PROJECTION_NOTE, "(_id=?)",
-                    new String[] {
-                        String.valueOf(Notes.ID_CALL_RECORD_FOLDER)
-                    }, null);
-            if (c != null) {
-                if (c.moveToNext()) {
-                    gid = c.getString(SqlNote.GTASK_ID_COLUMN);
-                    node = mGTaskHashMap.get(gid);
-                    if (node != null) {
-                        mGTaskHashMap.remove(gid);
-                        mGidToNid.put(gid, (long) Notes.ID_CALL_RECORD_FOLDER);
-                        mNidToGid.put((long) Notes.ID_CALL_RECORD_FOLDER, gid);
-                        // for system folder, only update remote name if
-                        // necessary
-                        if (!node.getName().equals(
-                                GTaskStringUtils.MIUI_FOLDER_PREFFIX
-                                        + GTaskStringUtils.FOLDER_CALL_NOTE))
-                            doContentSync(Node.SYNC_ACTION_UPDATE_REMOTE, node, c);
-                    } else {
-                        doContentSync(Node.SYNC_ACTION_ADD_REMOTE, node, c);
-                    }
-                }
-            } else {
-                Log.w(TAG, "failed to query call note folder");
-            }
-        } finally {
-            if (c != null) {
-                c.close();
-                c = null;
-            }
-        }
-
-        // for local existing folders
-        try {
-            c = mContentResolver.query(Notes.CONTENT_NOTE_URI, SqlNote.PROJECTION_NOTE,
-                    "(type=? AND parent_id<>?)", new String[] {
-                            String.valueOf(Notes.TYPE_FOLDER), String.valueOf(Notes.ID_TRASH_FOLER)
-                    }, NoteColumns.TYPE + " DESC");
-            if (c != null) {
-                while (c.moveToNext()) {
-                    gid = c.getString(SqlNote.GTASK_ID_COLUMN);
-                    node = mGTaskHashMap.get(gid);
-                    if (node != null) {
-                        mGTaskHashMap.remove(gid);
-                        mGidToNid.put(gid, c.getLong(SqlNote.ID_COLUMN));
-                        mNidToGid.put(c.getLong(SqlNote.ID_COLUMN), gid);
-                        syncType = node.getSyncAction(c);
-                    } else {
-                        if (c.getString(SqlNote.GTASK_ID_COLUMN).trim().length() == 0) {
-                            // local add
-                            syncType = Node.SYNC_ACTION_ADD_REMOTE;
-                        } else {
-                            // remote delete
-                            syncType = Node.SYNC_ACTION_DEL_LOCAL;
-                        }
-                    }
-                    doContentSync(syncType, node, c);
-                }
-            } else {
-                Log.w(TAG, "failed to query existing folder");
-            }
-        } finally {
-            if (c != null) {
-                c.close();
-                c = null;
-            }
-        }
-
-        // for remote add folders
-        Iterator<Map.Entry<String, TaskList>> iter = mGTaskListHashMap.entrySet().iterator();
-        while (iter.hasNext()) {
-            Map.Entry<String, TaskList> entry = iter.next();
-            gid = entry.getKey();
-            node = entry.getValue();
-            if (mGTaskHashMap.containsKey(gid)) {
-                mGTaskHashMap.remove(gid);
-                doContentSync(Node.SYNC_ACTION_ADD_LOCAL, node, null);
-            }
-        }
-
-        if (!mCancelled)
-            GTaskClient.getInstance().commitUpdate();
-    }
-
-    private void doContentSync(int syncType, Node node, Cursor c) throws NetworkFailureException {
-        if (mCancelled) {
-            return;
-        }
-
-        MetaData meta;
-        switch (syncType) {
-            case Node.SYNC_ACTION_ADD_LOCAL:
-                addLocalNode(node);
-                break;
-            case Node.SYNC_ACTION_ADD_REMOTE:
-                addRemoteNode(node, c);
-                break;
-            case Node.SYNC_ACTION_DEL_LOCAL:
-                meta = mMetaHashMap.get(c.getString(SqlNote.GTASK_ID_COLUMN));
-                if (meta != null) {
-                    GTaskClient.getInstance().deleteNode(meta);
-                }
-                mLocalDeleteIdMap.add(c.getLong(SqlNote.ID_COLUMN));
-                break;
-            case Node.SYNC_ACTION_DEL_REMOTE:
-                meta = mMetaHashMap.get(node.getGid());
-                if (meta != null) {
-                    GTaskClient.getInstance().deleteNode(meta);
-                }
-                GTaskClient.getInstance().deleteNode(node);
-                break;
-            case Node.SYNC_ACTION_UPDATE_LOCAL:
-                updateLocalNode(node, c);
-                break;
-            case Node.SYNC_ACTION_UPDATE_REMOTE:
-                updateRemoteNode(node, c);
-                break;
-            case Node.SYNC_ACTION_UPDATE_CONFLICT:
-                // merging both modifications maybe a good idea
-                // right now just use local update simply
-                updateRemoteNode(node, c);
-                break;
-            case Node.SYNC_ACTION_NONE:
-                break;
-            case Node.SYNC_ACTION_ERROR:
-            default:
-                throw new ActionFailureException("unkown sync action type");
+            Log.d(TAG, "clearAllRemote: done");
+        } catch (JSONException e) {
+            throw new SyncException(SyncException.DATA_ERROR,
+                    "Failed to clear remote containers", e);
         }
     }
 
-    private void addLocalNode(Node node) throws NetworkFailureException {
-        if (mCancelled) {
-            return;
-        }
-
-        SqlNote sqlNote;
-        if (node instanceof TaskList) {
-            if (node.getName().equals(
-                    GTaskStringUtils.MIUI_FOLDER_PREFFIX + GTaskStringUtils.FOLDER_DEFAULT)) {
-                sqlNote = new SqlNote(mContext, Notes.ID_ROOT_FOLDER);
-            } else if (node.getName().equals(
-                    GTaskStringUtils.MIUI_FOLDER_PREFFIX + GTaskStringUtils.FOLDER_CALL_NOTE)) {
-                sqlNote = new SqlNote(mContext, Notes.ID_CALL_RECORD_FOLDER);
-            } else {
-                sqlNote = new SqlNote(mContext);
-                sqlNote.setContent(node.getLocalJSONFromContent());
-                sqlNote.setParentId(Notes.ID_ROOT_FOLDER);
-            }
-        } else {
-            sqlNote = new SqlNote(mContext);
-            JSONObject js = node.getLocalJSONFromContent();
-            try {
-                if (js.has(GTaskStringUtils.META_HEAD_NOTE)) {
-                    JSONObject note = js.getJSONObject(GTaskStringUtils.META_HEAD_NOTE);
-                    if (note.has(NoteColumns.ID)) {
-                        long id = note.getLong(NoteColumns.ID);
-                        if (DataUtils.existInNoteDatabase(mContentResolver, id)) {
-                            // the id is not available, have to create a new one
-                            note.remove(NoteColumns.ID);
-                        }
-                    }
-                }
-
-                if (js.has(GTaskStringUtils.META_HEAD_DATA)) {
-                    JSONArray dataArray = js.getJSONArray(GTaskStringUtils.META_HEAD_DATA);
-                    for (int i = 0; i < dataArray.length(); i++) {
-                        JSONObject data = dataArray.getJSONObject(i);
-                        if (data.has(DataColumns.ID)) {
-                            long dataId = data.getLong(DataColumns.ID);
-                            if (DataUtils.existInDataDatabase(mContentResolver, dataId)) {
-                                // the data id is not available, have to create
-                                // a new one
-                                data.remove(DataColumns.ID);
-                            }
-                        }
-                    }
-
-                }
-            } catch (JSONException e) {
-                Log.w(TAG, e.toString());
-                e.printStackTrace();
-            }
-            sqlNote.setContent(js);
-
-            Long parentId = mGidToNid.get(((Task) node).getParent().getGid());
-            if (parentId == null) {
-                Log.e(TAG, "cannot find task's parent id locally");
-                throw new ActionFailureException("cannot add local node");
-            }
-            sqlNote.setParentId(parentId.longValue());
-        }
-
-        // create the local node
-        sqlNote.setGtaskId(node.getGid());
-        sqlNote.commit(false);
-
-        // update gid-nid mapping
-        mGidToNid.put(node.getGid(), sqlNote.getId());
-        mNidToGid.put(sqlNote.getId(), node.getGid());
-
-        // update meta
-        updateRemoteMeta(node.getGid(), sqlNote);
+    /**
+     * Reset gtask_id and sync_id for all non-system notes.
+     */
+    private void resetLocalSyncMetadata() {
+        ContentValues values = new ContentValues();
+        values.put(NoteColumns.GTASK_ID, "");
+        values.put(NoteColumns.SYNC_ID, 0);
+        int updated = mContentResolver.update(Notes.CONTENT_NOTE_URI, values,
+                "type<>?", new String[] { String.valueOf(Notes.TYPE_SYSTEM) });
+        Log.d(TAG, "resetLocalSyncMetadata: cleared gid/sync_id for " + updated + " items");
     }
 
-    private void updateLocalNode(Node node, Cursor c) throws NetworkFailureException {
-        if (mCancelled) {
-            return;
-        }
-
-        SqlNote sqlNote;
-        // update the note locally
-        sqlNote = new SqlNote(mContext, c);
-        sqlNote.setContent(node.getLocalJSONFromContent());
-
-        Long parentId = (node instanceof Task) ? mGidToNid.get(((Task) node).getParent().getGid())
-                : new Long(Notes.ID_ROOT_FOLDER);
-        if (parentId == null) {
-            Log.e(TAG, "cannot find task's parent id locally");
-            throw new ActionFailureException("cannot update local node");
-        }
-        sqlNote.setParentId(parentId.longValue());
-        sqlNote.commit(true);
-
-        // update meta info
-        updateRemoteMeta(node.getGid(), sqlNote);
-    }
-
-    private void addRemoteNode(Node node, Cursor c) throws NetworkFailureException {
-        if (mCancelled) {
-            return;
-        }
-
-        SqlNote sqlNote = new SqlNote(mContext, c);
-        Node n;
-
-        // update remotely
-        if (sqlNote.isNoteType()) {
-            Task task = new Task();
-            task.setContentByLocalJSON(sqlNote.getContent());
-
-            String parentGid = mNidToGid.get(sqlNote.getParentId());
-            if (parentGid == null) {
-                Log.e(TAG, "cannot find task's parent tasklist");
-                throw new ActionFailureException("cannot add remote task");
-            }
-            mGTaskListHashMap.get(parentGid).addChildTask(task);
-
-            GTaskClient.getInstance().createTask(task);
-            n = (Node) task;
-
-            // add meta
-            updateRemoteMeta(task.getGid(), sqlNote);
-        } else {
-            TaskList tasklist = null;
-
-            // we need to skip folder if it has already existed
-            String folderName = GTaskStringUtils.MIUI_FOLDER_PREFFIX;
-            if (sqlNote.getId() == Notes.ID_ROOT_FOLDER)
-                folderName += GTaskStringUtils.FOLDER_DEFAULT;
-            else if (sqlNote.getId() == Notes.ID_CALL_RECORD_FOLDER)
-                folderName += GTaskStringUtils.FOLDER_CALL_NOTE;
-            else
-                folderName += sqlNote.getSnippet();
-
-            Iterator<Map.Entry<String, TaskList>> iter = mGTaskListHashMap.entrySet().iterator();
-            while (iter.hasNext()) {
-                Map.Entry<String, TaskList> entry = iter.next();
-                String gid = entry.getKey();
-                TaskList list = entry.getValue();
-
-                if (list.getName().equals(folderName)) {
-                    tasklist = list;
-                    if (mGTaskHashMap.containsKey(gid)) {
-                        mGTaskHashMap.remove(gid);
-                    }
-                    break;
-                }
-            }
-
-            // no match we can add now
-            if (tasklist == null) {
-                tasklist = new TaskList();
-                tasklist.setContentByLocalJSON(sqlNote.getContent());
-                GTaskClient.getInstance().createTaskList(tasklist);
-                mGTaskListHashMap.put(tasklist.getGid(), tasklist);
-            }
-            n = (Node) tasklist;
-        }
-
-        // update local note
-        sqlNote.setGtaskId(n.getGid());
-        sqlNote.commit(false);
-        sqlNote.resetLocalModified();
-        sqlNote.commit(true);
-
-        // gid-id mapping
-        mGidToNid.put(n.getGid(), sqlNote.getId());
-        mNidToGid.put(sqlNote.getId(), n.getGid());
-    }
-
-    private void updateRemoteNode(Node node, Cursor c) throws NetworkFailureException {
-        if (mCancelled) {
-            return;
-        }
-
-        SqlNote sqlNote = new SqlNote(mContext, c);
-
-        // update remotely
-        node.setContentByLocalJSON(sqlNote.getContent());
-        GTaskClient.getInstance().addUpdateNode(node);
-
-        // update meta
-        updateRemoteMeta(node.getGid(), sqlNote);
-
-        // move task if necessary
-        if (sqlNote.isNoteType()) {
-            Task task = (Task) node;
-            TaskList preParentList = task.getParent();
-
-            String curParentGid = mNidToGid.get(sqlNote.getParentId());
-            if (curParentGid == null) {
-                Log.e(TAG, "cannot find task's parent tasklist");
-                throw new ActionFailureException("cannot update remote task");
-            }
-            TaskList curParentList = mGTaskListHashMap.get(curParentGid);
-
-            if (preParentList != curParentList) {
-                preParentList.removeChildTask(task);
-                curParentList.addChildTask(task);
-                GTaskClient.getInstance().moveTask(task, preParentList, curParentList);
-            }
-        }
-
-        // clear local modified flag
-        sqlNote.resetLocalModified();
-        sqlNote.commit(true);
-    }
-
-    private void updateRemoteMeta(String gid, SqlNote sqlNote) throws NetworkFailureException {
-        if (sqlNote != null && sqlNote.isNoteType()) {
-            MetaData metaData = mMetaHashMap.get(gid);
-            if (metaData != null) {
-                metaData.setMeta(gid, sqlNote.getContent());
-                GTaskClient.getInstance().addUpdateNode(metaData);
-            } else {
-                metaData = new MetaData();
-                metaData.setMeta(gid, sqlNote.getContent());
-                mMetaList.addChildTask(metaData);
-                mMetaHashMap.put(gid, metaData);
-                GTaskClient.getInstance().createTask(metaData);
-            }
-        }
-    }
-
-    private void refreshLocalSyncId() throws NetworkFailureException {
-        if (mCancelled) {
-            return;
-        }
-
-        // get the latest gtask list
-        mGTaskHashMap.clear();
-        mGTaskListHashMap.clear();
-        mMetaHashMap.clear();
-        initGTaskList();
-
-        Cursor c = null;
-        try {
-            c = mContentResolver.query(Notes.CONTENT_NOTE_URI, SqlNote.PROJECTION_NOTE,
-                    "(type<>? AND parent_id<>?)", new String[] {
-                            String.valueOf(Notes.TYPE_SYSTEM), String.valueOf(Notes.ID_TRASH_FOLER)
-                    }, NoteColumns.TYPE + " DESC");
-            if (c != null) {
-                while (c.moveToNext()) {
-                    String gid = c.getString(SqlNote.GTASK_ID_COLUMN);
-                    Node node = mGTaskHashMap.get(gid);
-                    if (node != null) {
-                        mGTaskHashMap.remove(gid);
-                        ContentValues values = new ContentValues();
-                        values.put(NoteColumns.SYNC_ID, node.getLastModified());
-                        mContentResolver.update(ContentUris.withAppendedId(Notes.CONTENT_NOTE_URI,
-                                c.getLong(SqlNote.ID_COLUMN)), values, null, null);
-                    } else {
-                        Log.e(TAG, "something is missed");
-                        throw new ActionFailureException(
-                                "some local items don't have gid after sync");
-                    }
-                }
-            } else {
-                Log.w(TAG, "failed to query local note to refresh sync id");
-            }
-        } finally {
-            if (c != null) {
-                c.close();
-                c = null;
-            }
-        }
-    }
+    // ── Public utilities ────────────────────────────────────────────
 
     public String getSyncAccount() {
-        return GTaskClient.getInstance().getSyncAccount().name;
+        if (mContext == null) {
+            return "";
+        }
+        SyncClient syncClient = SyncClientFactory.getSyncClient(mContext);
+        if (syncClient != null) {
+            return syncClient.getAccountIdentifier();
+        }
+        return "";
     }
 
     public void cancelSync() {
